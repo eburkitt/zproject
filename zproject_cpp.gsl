@@ -1,0 +1,610 @@
+#   Generate minimal standard C++ language bindings.
+#
+#   This is a code generator built using the iMatix GSL code generation
+#   language. See https://github.com/imatix/gsl for details.
+#
+#   Copyright (c) the Contributors as noted in the AUTHORS file.
+#   This file is part of zproject.
+#
+#   This Source Code Form is subject to the terms of the Mozilla Public
+#   License, v. 2.0. If a copy of the MPL was not distributed with this
+#   file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+register_target ("cpp", "Standard C++ binding")
+
+#   Target provides name space isolation for its functions
+function target_cpp
+
+#  This function will map c types to C++ types and also define how C++ types are
+#  transformed from and to c types when the c api is called.
+#
+function resolve_container (container)
+    my.container.cpp_name = "$(my.container.name:c)"
+    my.container.cpp_type = my.container.c_type
+    my.container.cpp_arg_name = my.container.cpp_name
+    my.container.cpp_rtn_type = my.container.c_type
+    my.container.cpp_call_pre = my.container.cpp_rtn_type + " rv = "
+    my.container.cpp_call_post = ""
+    my.container.qtReturn = "return rv;"
+
+    # Use native Qt types instead of the c ones.
+    if my.container.c_type = "void"
+        my.container.cpp_call_pre = ""
+        my.container.qtReturn = ""
+    elsif my.container.type = "string" & !my.container.by_reference & !my.container.fresh
+        my.container.cpp_type = "std::string const &"
+        my.container.cpp_arg_name = my.container.cpp_name + ".c_str()"
+        my.container.cpp_rtn_type = "std::string const"
+        my.container.cpp_call_pre = my.container.cpp_rtn_type + " rv = std::string ("
+        my.container.cpp_call_post = ")"
+    elsif my.container.type = "string"
+        my.container.cpp_type = "std::string"
+        my.container.cpp_arg_name = my.container.cpp_name + ".c_str()"
+        my.container.cpp_rtn_type = "std::string"
+        my.container.cpp_call_pre = "char *retStr_ = "
+        my.container.cpp_call_post = ";\n" + \
+        "    std::string rv = std::string (retStr_);\n" + \
+        "    zstr_free (&retStr_)"
+    elsif my.container.type = "format"
+        my.container.cpp_name = "param" # Rename as 'format' is confusing, due to not being format in Qt
+        my.container.cpp_type = "const QString &"
+        # Pass as string format argument, to avoid escaping problems.
+        my.container.cpp_arg_name = "\"%s\", " + my.container.cpp_name + ".toUtf8().data()"
+        my.container.cpp_rtn_type = "const QString"
+        my.container.cpp_call_pre = my.container.cpp_rtn_type + " rv = QString ("
+        my.container.cpp_call_post = ")"
+    elsif count (project.class, defined (class.cpp_name) & (my.container.type = class.c_name)) \
+        | count (dependencies.class, defined (class.cpp_name) & (my.container.type = class.c_name))
+        # Resolve c classes
+        for project.class where (defined (class.cpp_name) & (my.container.type = class.c_name))
+            my.container.cpp_type = "$(class.cpp_name) *"
+            my.container.cpp_arg_name = my.container.cpp_name + "->self"
+            my.container.cpp_rtn_type = "$(class.cpp_name) *"
+            my.container.cpp_call_pre = my.container.cpp_rtn_type + "rv = new $(class.cpp_name) ("
+            my.container.cpp_call_post = ")"
+            if my.container.by_reference
+                my.container.cpp_arg_name = "&" + my.container.cpp_arg_name
+                my.container.cpp_call_pre = my.container.cpp_call_pre + "*"
+            endif
+        endfor
+        for dependencies.class where (defined (class.cpp_name) & (my.container.type = class.c_name))
+            my.container.cpp_type = "$(class.cpp_name) *"
+            my.container.cpp_arg_name = my.container.cpp_name + "->self"
+            my.container.cpp_rtn_type = "$(class.cpp_name) *"
+            my.container.cpp_call_pre = my.container.cpp_rtn_type + "rv = new $(class.cpp_name) ("
+            my.container.cpp_call_post = ")"
+            if my.container.by_reference
+                my.container.cpp_arg_name = "&" + my.container.cpp_arg_name
+                my.container.cpp_call_pre = my.container.cpp_call_pre + "*"
+            endif
+        endfor
+    endif
+
+    if my.container.variadic
+        my.container.cpp_type = ""
+        my.container.cpp_name = "..."
+        my.container.cpp_arg_name = "args"
+        my.container.qtArgPassPre = "va_list args;\n    va_start (args, " + my.container.va_start + ");"
+        my.container.qtArgPassPost = "va_end (args);"
+    endif
+endfunction
+
+function method_has_self_pointer (method)
+    for my.method.argument
+        if argument_is_self_pointer (argument)
+            return 1
+        endif
+    endfor
+    return 0
+endfunction
+
+function argument_is_self_pointer (argument)
+    if argument.name = "self_p"
+        return 1
+    else
+        return 0
+    endif
+endfunction
+
+#
+#  A function for constructing a string of arguments for a method declaration
+#  in source/header files. Returns the argument string or 'ERROR'.
+#
+function method_arguments (method)
+    my.problematic = 0
+    my.out = ""
+    # Skip arguments that are,
+    #   * self pointer to wrapped struct
+    #   * variadic argument, if start argument is of type format
+    for my.method.argument where !argument_is_self_pointer (argument) & \
+                                 !(argument.variadic & count (my.method.argument, argument.type = "format"))
+        resolve_container (argument)
+        if !(my.method.is_destructor & first ())
+            my.out += argument.cpp_type
+            if !regexp.match ("[\\*&]$", argument.cpp_type?"")
+                my.out += " "
+            endif
+            my.out += argument.cpp_name
+        endif
+        if !last ()
+            my.out += ", "
+        endif
+    endfor
+    if my.problematic
+        my.out = "ERROR"
+    endif
+    return my.out
+endfunction
+
+#
+# A function for constructing the string for a return type in a QML C header
+#
+function method_return_type (method)
+    resolve_container (my.method->return)
+    my.out = "$(my.method->return.cpp_rtn_type) "
+    return my.out
+endfunction
+
+#
+# A function for constructing the string for a method signature in Qt C++ file
+#
+function method_signature (method, in_header)
+    # Resolve conflicts with defines
+    for class.method
+        if method.name = "streq" \
+         | method.name = "strneq" \
+         | method.name = "export" \
+         | method.name = "delete" \
+         | method.name = "foreach"
+            method.QtName = method.name + " no conflict"
+        else
+            method.QtName = method.name
+        endif
+    endfor
+    for class.constructor as method
+        if method.name = "streq" \
+         | method.name = "strneq" \
+         | method.name = "export" \
+         | method.name = "delete" \
+         | method.name = "foreach"
+            method.QtName = method.name + " no conflict"
+        else
+            method.QtName = method.name
+        endif
+    endfor
+    my.problematic = 0
+    my.out = ""
+    if !my.method.is_destructor & !(my.method.is_constructor & my.method.name = "new")
+        if my.in_header & my.method.singleton & !method_has_self_pointer (my.method)
+                my.out += "static "
+        endif
+        if !my.method.is_constructor
+            my.out += method_return_type (my.method)
+        elsif my.method.name <> "new"
+            my.out += "$(class.cpp_name)* "
+        endif
+    else
+        method_return_type (my.method)
+    endif
+    if my.in_header
+        if my.method.is_constructor
+            if my.method.name = "new"
+                my.out += "explicit $(class.cpp_name)"
+            else
+                my.out += "$(my.method.QtName:camel)"
+            endif
+        elsif my.method.is_destructor
+            my.out += "~$(class.cpp_name)"
+        endif
+    else
+        my.out += "$(class.cpp_name:)::"
+        if my.method.is_constructor
+            if my.method.name = "new"
+                my.out += "$(class.cpp_name)"
+            else
+                my.out += "$(my.method.QtName:camel)"
+            endif
+        elsif my.method.is_destructor
+            my.out += "~$(class.cpp_name)"
+        endif
+    endif
+
+    if !my.method.is_constructor & !my.method.is_destructor
+        my.out += "$(my.method.QtName:camel)"
+    endif
+    my.out += " ("
+
+    my.args = method_arguments (my.method)
+    if my.args = "ERROR"
+        my.problematic = 1
+    else
+        my.out += my.args
+    endif
+
+    my.out += ")"
+
+    # Variadic methods without a va_list sibling are not allowed, as the
+    # arguments cannot be forwarded < C++11. This is to ensure backwards
+    # compatibility.
+    # Exception is if the type is format!
+    if count (my.method.argument, argument.variadic) & \
+       !count (my.method.argument, argument.type = "format") & !my.method.has_va_list_sibling
+        my.problematic = 1
+    endif
+
+    # Exclude methods where strings are passed by reference as the might get
+    # deleted which does not play well with QString.
+    if count (my.method.argument, argument.type = "string" & argument.by_reference)
+        my.problematic = 1
+    endif
+
+    if my.problematic
+        my.out = # undefined
+    endif
+    return my.out
+endfunction
+
+function print_class_header (class)
+    >/*
+    >$(project.GENERATED_WARNING_HEADER:)
+    >*/
+    >#ifndef CPP_$(CLASS.C_NAME)_HPP
+    >#define CPP_$(CLASS.C_NAME)_HPP
+    >
+    >#include "$(project.cpp_name).hpp"
+    >
+    >namespace cpp {
+    >
+    >class CPP_$(PROJECT.PREFIX)_EXPORT $(class.cpp_name:)
+    >{
+    >public:
+    >
+    >    //  Copy-construct to return the proper wrapped c types
+    >    $(class.cpp_name:camel) ($(class.name:c)_t *self);
+    for class.constructor as method where defined (method_signature (method, 1))
+        >
+        >    //  $(method.description:no,block)
+        >    $(method_signature (method, 1));
+    endfor
+    for class.destructor as method where defined (method_signature (method, 1))
+        >
+        >    //  $(method.description:no,block)
+        >    $(method_signature (method, 1));
+    endfor
+    for class.method where defined (method_signature (method, 1))
+        >
+        >    //  $(method.description:no,block)
+        >    $(method_signature (method, 1));
+    endfor
+    >
+    >    $(class.c_name:)_t *self;
+    >};
+    >
+    >}  //namespace cpp
+    >
+    >#endif //  CPP_$(CLASS.C_NAME)_HPP
+    >/*
+    >$(project.GENERATED_WARNING_HEADER:)
+    >*/
+endfunction
+
+function print_class_body (class)
+    >/*
+    >$(project.GENERATED_WARNING_HEADER:)
+    >*/
+    >
+    >#include "$(project.cpp_name).hpp"
+    >
+    >using namespace cpp;
+    >
+    >///
+    >//  Copy-construct to return the proper wrapped c types
+    >$(class.cpp_name)::$(class.cpp_name) ($(class.name:c)_t *self)
+    >{
+    >    this->self = self;
+    >}
+    >
+    for class.constructor as method where defined (method_signature (method, 0))
+        >
+        >///
+        >//  $(method.description:no,block)
+        >$(method_signature (method, 0))
+        >{
+        if index () = 1
+            >    this->self = $(class.c_name:)_$(method.c_name) (\
+        else
+            >    return new $(class.cpp_name) ($(class.c_name:)_$(method.c_name) (\
+        endif
+        for method.argument where !argument.variadic
+            >$(argument.cpp_arg_name)\
+            if !last ()
+                >, \
+            endif
+        endfor
+        if index () = 1
+            >);
+        else
+            >), qObjParent);
+        endif
+        >}
+    endfor
+    for class.destructor as method where defined (method_signature (method, 0))
+        >
+        >///
+        >//  $(method.description:no,block)
+        >$(method_signature (method, 0))
+        >{
+        >    $(method->return.cpp_call_pre)$(class.c_name:)_$(method.c_name) (&self\
+        if count (method.argument) > 1
+            >, \
+        endif
+        for method.argument where !argument.variadic
+            if !first ()
+                >$(argument.cpp_arg_name)\
+            endif
+            if !last ()
+                >, \
+            endif
+        endfor
+        >)$(method->return.cpp_call_post);
+        >}
+    endfor
+    for class.method where defined (method_signature (method, 0))
+        >
+        >///
+        >//  $(method.description:no,block)
+        >$(method_signature (method, 0))
+        >{
+        for method.argument where defined (argument.qtArgPassPre)
+            >    $(argument.qtArgPassPre)
+        endfor
+        if (method.has_va_list_sibling)
+            >    $(method->return.cpp_call_pre)$(class.c_name:)_v$(method.c_name) (\
+        else
+            >    $(method->return.cpp_call_pre)$(class.c_name:)_$(method.c_name) (\
+        endif
+        if method_has_self_pointer (method)
+            >&self\
+            if count (method.argument) > 1
+                >, \
+            endif
+        elsif !method.singleton
+            >self\
+            if count (method.argument)
+                >, \
+            endif
+        endif
+        for method.argument where !(!method.has_va_list_sibling & argument.variadic) \
+                                & !argument_is_self_pointer (argument)
+            >$(argument.cpp_arg_name)\
+            if !last ()
+                >, \
+            endif
+        endfor
+        >)$(method->return.cpp_call_post);
+        for method.argument where defined (argument.qtArgPassPost)
+            >    $(argument.qtArgPassPost)
+        endfor
+        >    $(method->return.qtReturn)
+        >}
+    endfor
+    >/*
+    >$(project.GENERATED_WARNING_HEADER:)
+    >*/
+endfunction
+
+.macro generate_binding ()
+.directory.create ("bindings/cpp/src")
+.for class where defined (class.api) & class.private = "0"
+.   output "bindings/cpp/src/$(class.cpp_name).hpp"
+.   print_class_header (class)
+.   close
+.endfor
+.#
+.for dependencies.class
+.   output "bindings/cpp/src/$(class.cpp_name).h"
+.   print_class_header (class)
+.   close
+.endfor
+.
+.for class where defined (class.api) & class.private = "0"
+.   output "bindings/cpp/src/$(class.cpp_name).cpp"
+.   print_class_body (class)
+.   close
+.endfor
+.#
+.for dependencies.class
+.  output "bindings/cpp/src/$(class.cpp_name).cpp"
+.  print_class_body (class)
+.  close
+.endfor
+.
+.output "bindings/cpp/src/$(project.cpp_name).hpp"
+/*
+$(project.GENERATED_WARNING_HEADER:)
+*/
+#ifndef CPP_$(PROJECT.PREFIX)_HPP
+#define CPP_$(PROJECT.PREFIX)_HPP
+
+#include <string>
+#include <$(project.header:)>
+
+#if defined(_WIN32)
+#  if !defined(CPP_$(PROJECT.PREFIX)_EXPORT) && !defined(CPP_$(PROJECT.PREFIX)_IMPORT)
+#    define CPP_$(PROJECT.PREFIX)_EXPORT
+#  elif defined(CPP_$(PROJECT.PREFIX)_IMPORT)
+#    if defined(CPP_$(PROJECT.PREFIX)_EXPORT)
+#      undef CPP_$(PROJECT.PREFIX)_EXPORT
+#    endif
+#    define CPP_$(PROJECT.PREFIX)_EXPORT __declspec(dllimport)
+#  elif defined(CPP_$(PROJECT.PREFIX)_EXPORT)
+#    undef CPP_$(PROJECT.PREFIX)_EXPORT
+#    define CPP_$(PROJECT.PREFIX)_EXPORT __declspec(dllexport)
+#  endif
+#else
+#  define CPP_$(PROJECT.PREFIX)_EXPORT
+#endif
+
+//  Opaque class structures to allow forward references
+.for class where defined (class.api) & class.private = "0"
+class $(class.cpp_name:);
+.endfor
+.for dependencies.class
+class $(class.cpp_name:);
+.endfor
+
+//  Public API classes
+.for class where defined (class.api) & class.private = "0"
+#include "$(class.cpp_name).h"
+.endfor
+.for dependencies.class
+#include "$(class.cpp_name).h"
+.endfor
+
+#endif //  CPP_$(PROJECT.PREFIX)_HPP
+/*
+$(project.GENERATED_WARNING_HEADER:)
+*/
+.close
+.###############################################################################
+.#                                                                             #
+.# Generate selftest main.cpp                                                  #
+.#                                                                             #
+.###############################################################################
+.if !file.exists ("bindings/cpp/selftest")
+.   directory.create("bindings/cpp/selftest")
+.endif
+.output "bindings/cpp/selftest/main.cpp"
+/*
+$(project.GENERATED_WARNING_HEADER:)
+*/
+#include <iostream>
+#include "$(project.cpp_name).h"
+
+int main(int argc, char **argv)
+{
+    bool verbose;
+    if (argc == 2 && streq (argv [1], "-v"))
+        verbose = true;
+    else
+        verbose = false;
+
+    std::cout << "Running $(project.cpp_name) selftests...\\n";
+
+.for class where defined (class.api) & class.private = "0"
+    $(class.cpp_name)::test (verbose);
+.endfor
+.for dependencies.class
+    $(class.cpp_name)::test (verbose);
+.endfor
+
+    std::cout << "Tests passed OK\\n";
+    return 0;
+}
+/*
+$(project.GENERATED_WARNING_HEADER:)
+*/
+.close
+.###############################################################################
+.#                                                                             #
+.# Generate README.md                                                          #
+.#                                                                             #
+.###############################################################################
+.output "bindings/cpp/README.md"
+```
+$(project.GENERATED_WARNING_HEADER:)
+```
+# $(project.cpp_name)
+
+## Overview
+
+$(project.cpp_name) is a standard C++ wrapper for $(project.name). It's possible to
+statically or dynamically link against it as well as use it as internal or external
+library.
+
+## Internal library
+
+You can use the Qt wrapper as internal library by including the
+`$(project.cpp_name).pri` file. Here is a minimal example app:
+
+```make
+QT += core
+QT -= gui
+
+include(<path to pri file>/$(project.cpp_name).pri)
+
+CONFIG   += console
+CONFIG   -= app_bundle
+
+TEMPLATE = app
+
+SOURCES += main.cpp
+```
+
+To link statically against the wrapper you need to change the
+`$(PROJECT.CPP_NAME)_LIBRARY` variable in `config.pri` to `no`.
+
+To link dynamically against the wrapper you need to change the
+`$(PROJECT.CPP_NAME)_LIBRARY` variable in `config.pri` to `yes`.
+
+## External library
+
+To install $(project.cpp_name) as a shared library do the following:
+
+```sh
+qmake
+make
+sudo make install
+```
+
+The default installation directory prefix on unix is `/usr/local/`. If you like
+to change the prefix define the PREFIX variable when calling qmake:
+
+```sh
+qmake PREFIX=/usr
+```
+
+## Notes
+
+### Dependent classes
+
+If the bindings are generated as part of a zproject that depends on another
+zproject (e.g. zyre on czmq), the Qt bindings will automatically detect all
+dependent classes and generate bindings for them too. Check the ./generate.sh
+output the see which dependent classes couldn't be resolved.
+
+### Format methods
+
+Whenever a c method takes a format followed by variadic arguments, this is
+replaced in the Qt bindings by one string instead.
+
+### Excluded methods
+
+If you're missing some methods in the bindings then because they have been
+excluded. Currently methods are excluded if,
+
+    * they have variadic arguments and don't have a sibling method that
+      accepts a va_list. Most prominent example is probably printf and vprintf.
+
+    * they have char** arguments, as they might get freed which doesn't play
+      well with QString.
+
+```
+$(project.GENERATED_WARNING_HEADER:)
+```
+.close
+.endmacro
+
+    if count (class, defined (class.api) & class.private = "0")
+        project.cpp_name = project.name
+        for class where defined (class.api) & class.private = "0"
+            class.cpp_name = class.c_name
+        endfor
+        for dependencies.class
+            class.cpp_name = class.c_name
+        endfor
+        generate_binding ()
+    else
+        echo "WTF!? Nothing to do."
+    endif
+endfunction
