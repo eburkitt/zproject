@@ -15,26 +15,28 @@ register_target ("cpp", "Standard C++ binding")
 #   Target provides name space isolation for its functions
 function target_cpp
 
+namespace = "zeromq"
+
 #  This function will map c types to C++ types and also define how C++ types are
 #  transformed from and to c types when the c api is called.
 #
 function resolve_container (container)
-    my.container.cpp_name = "$(my.container.name:c)"
+    my.container.cpp_name = my.container.c_name
     my.container.cpp_type = my.container.c_type
     my.container.cpp_arg_name = my.container.cpp_name
     my.container.cpp_rtn_type = my.container.c_type
     my.container.cpp_call_pre = my.container.cpp_rtn_type + " rv = "
     my.container.cpp_call_post = ""
-    my.container.qtReturn = "return rv;"
+    my.container.cpp_return = "return rv;"
 
-    # Use native Qt types instead of the c ones.
+    # Translate some native C types to C++
     if my.container.c_type = "void"
         my.container.cpp_call_pre = ""
-        my.container.qtReturn = ""
+        my.container.cpp_return = ""
     elsif my.container.type = "string" & !my.container.by_reference & !my.container.fresh
         my.container.cpp_type = "std::string const &"
         my.container.cpp_arg_name = my.container.cpp_name + ".c_str()"
-        my.container.cpp_rtn_type = "std::string const"
+        my.container.cpp_rtn_type = "std::string"
         my.container.cpp_call_pre = my.container.cpp_rtn_type + " rv = std::string ("
         my.container.cpp_call_post = ")"
     elsif my.container.type = "string"
@@ -45,21 +47,13 @@ function resolve_container (container)
         my.container.cpp_call_post = ";\n" + \
         "    std::string rv = std::string (retStr_);\n" + \
         "    zstr_free (&retStr_)"
-    elsif my.container.type = "format"
-        my.container.cpp_name = "param" # Rename as 'format' is confusing, due to not being format in Qt
-        my.container.cpp_type = "const QString &"
-        # Pass as string format argument, to avoid escaping problems.
-        my.container.cpp_arg_name = "\"%s\", " + my.container.cpp_name + ".toUtf8().data()"
-        my.container.cpp_rtn_type = "const QString"
-        my.container.cpp_call_pre = my.container.cpp_rtn_type + " rv = QString ("
-        my.container.cpp_call_post = ")"
     elsif count (project.class, defined (class.cpp_name) & (my.container.type = class.c_name)) \
         | count (dependencies.class, defined (class.cpp_name) & (my.container.type = class.c_name))
         # Resolve c classes
         for project.class where (defined (class.cpp_name) & (my.container.type = class.c_name))
-            my.container.cpp_type = "$(class.cpp_name) *"
+            my.container.cpp_type = "$(namespace)::$(class.cpp_name) *"
             my.container.cpp_arg_name = my.container.cpp_name + "->self"
-            my.container.cpp_rtn_type = "$(class.cpp_name) *"
+            my.container.cpp_rtn_type = "$(namespace)::$(class.cpp_name) *"
             my.container.cpp_call_pre = my.container.cpp_rtn_type + "rv = new $(class.cpp_name) ("
             my.container.cpp_call_post = ")"
             if my.container.by_reference
@@ -68,9 +62,9 @@ function resolve_container (container)
             endif
         endfor
         for dependencies.class where (defined (class.cpp_name) & (my.container.type = class.c_name))
-            my.container.cpp_type = "$(class.cpp_name) *"
+            my.container.cpp_type = "$(namespace)::$(class.cpp_name) *"
             my.container.cpp_arg_name = my.container.cpp_name + "->self"
-            my.container.cpp_rtn_type = "$(class.cpp_name) *"
+            my.container.cpp_rtn_type = "$(namespace)::$(class.cpp_name) *"
             my.container.cpp_call_pre = my.container.cpp_rtn_type + "rv = new $(class.cpp_name) ("
             my.container.cpp_call_post = ")"
             if my.container.by_reference
@@ -111,13 +105,10 @@ endfunction
 #  in source/header files. Returns the argument string or 'ERROR'.
 #
 function method_arguments (method)
-    my.problematic = 0
+#    my.problematic = 0
     my.out = ""
-    # Skip arguments that are,
-    #   * self pointer to wrapped struct
-    #   * variadic argument, if start argument is of type format
-    for my.method.argument where !argument_is_self_pointer (argument) & \
-                                 !(argument.variadic & count (my.method.argument, argument.type = "format"))
+    # Skip arguments that are self pointer to wrapped struct
+    for my.method.argument where !argument_is_self_pointer (argument)
         resolve_container (argument)
         if !(my.method.is_destructor & first ())
             my.out += argument.cpp_type
@@ -130,9 +121,9 @@ function method_arguments (method)
             my.out += ", "
         endif
     endfor
-    if my.problematic
-        my.out = "ERROR"
-    endif
+#    if my.problematic
+#        my.out = "ERROR"
+#    endif
     return my.out
 endfunction
 
@@ -146,7 +137,7 @@ function method_return_type (method)
 endfunction
 
 #
-# A function for constructing the string for a method signature in Qt C++ file
+# A function for constructing the string for a method signature in C++ file
 #
 function method_signature (method, in_header)
     # Resolve conflicts with defines
@@ -156,10 +147,12 @@ function method_signature (method, in_header)
          | method.name = "export" \
          | method.name = "delete" \
          | method.name = "foreach"
-            method.QtName = method.name + " no conflict"
+            method.cpp_name = "$(method.name) no conflict"
         else
-            method.QtName = method.name
+            method.cpp_name = method.name
         endif
+        method.cpp_name = "$(method.cpp_name:c)"
+#        echo "class $(class.name); method name $(method.name); method cpp_name $(method.cpp_name)"
     endfor
     for class.constructor as method
         if method.name = "streq" \
@@ -167,21 +160,25 @@ function method_signature (method, in_header)
          | method.name = "export" \
          | method.name = "delete" \
          | method.name = "foreach"
-            method.QtName = method.name + " no conflict"
+            method.cpp_name = "$(method.name) no conflict"
         else
-            method.QtName = method.name
+            method.cpp_name = method.name
         endif
+        method.cpp_name = "$(method.cpp_name:c)"
+#        echo "class $(class.name); ctor name $(method.name); ctor cpp_name $(method.cpp_name)"
     endfor
+    
     my.problematic = 0
     my.out = ""
     if !my.method.is_destructor & !(my.method.is_constructor & my.method.name = "new")
         if my.in_header & my.method.singleton & !method_has_self_pointer (my.method)
-                my.out += "static "
+            my.out += "static "
+#            echo "is ctor? $(my.method.is_constructor); name $(my.method.name); class cpp_name $(class.cpp_name)"
         endif
         if !my.method.is_constructor
             my.out += method_return_type (my.method)
         elsif my.method.name <> "new"
-            my.out += "$(class.cpp_name)* "
+            my.out += "$(namespace)::$(class.cpp_name) *"
         endif
     else
         method_return_type (my.method)
@@ -189,9 +186,9 @@ function method_signature (method, in_header)
     if my.in_header
         if my.method.is_constructor
             if my.method.name = "new"
-                my.out += "explicit $(class.cpp_name)"
+                my.out += "$(class.cpp_name)"
             else
-                my.out += "$(my.method.QtName:camel)"
+                my.out += "$(my.method.cpp_name)"
             endif
         elsif my.method.is_destructor
             my.out += "~$(class.cpp_name)"
@@ -202,7 +199,7 @@ function method_signature (method, in_header)
             if my.method.name = "new"
                 my.out += "$(class.cpp_name)"
             else
-                my.out += "$(my.method.QtName:camel)"
+                my.out += "$(my.method.cpp_name)"
             endif
         elsif my.method.is_destructor
             my.out += "~$(class.cpp_name)"
@@ -210,12 +207,13 @@ function method_signature (method, in_header)
     endif
 
     if !my.method.is_constructor & !my.method.is_destructor
-        my.out += "$(my.method.QtName:camel)"
+        my.out += "$(my.method.cpp_name:c)"
     endif
     my.out += " ("
 
     my.args = method_arguments (my.method)
     if my.args = "ERROR"
+        echo "BOOM 1 on $(class.name).$(my.method.name)"
         my.problematic = 1
     else
         my.out += my.args
@@ -229,12 +227,14 @@ function method_signature (method, in_header)
     # Exception is if the type is format!
     if count (my.method.argument, argument.variadic) & \
        !count (my.method.argument, argument.type = "format") & !my.method.has_va_list_sibling
+        echo "BOOM 2 on $(class.name).$(my.method.name)"
         my.problematic = 1
     endif
 
     # Exclude methods where strings are passed by reference as the might get
     # deleted which does not play well with QString.
     if count (my.method.argument, argument.type = "string" & argument.by_reference)
+        echo "BOOM 3 on $(class.name).$(my.method.name)"
         my.problematic = 1
     endif
 
@@ -253,14 +253,14 @@ function print_class_header (class)
     >
     >#include "$(project.cpp_name).hpp"
     >
-    >namespace cpp {
+    >namespace $(namespace) {
     >
     >class CPP_$(PROJECT.PREFIX)_EXPORT $(class.cpp_name:)
     >{
     >public:
     >
     >    //  Copy-construct to return the proper wrapped c types
-    >    $(class.cpp_name:camel) ($(class.name:c)_t *self);
+    >    $(class.cpp_name) ($(class.name:c)_t *self);
     for class.constructor as method where defined (method_signature (method, 1))
         >
         >    //  $(method.description:no,block)
@@ -280,7 +280,7 @@ function print_class_header (class)
     >    $(class.c_name:)_t *self;
     >};
     >
-    >}  //namespace cpp
+    >}  //namespace $(namespace)
     >
     >#endif //  CPP_$(CLASS.C_NAME)_HPP
     >/*
@@ -295,7 +295,7 @@ function print_class_body (class)
     >
     >#include "$(project.cpp_name).hpp"
     >
-    >using namespace cpp;
+    >using namespace $(namespace);
     >
     >///
     >//  Copy-construct to return the proper wrapped c types
@@ -385,7 +385,7 @@ function print_class_body (class)
         for method.argument where defined (argument.qtArgPassPost)
             >    $(argument.qtArgPassPost)
         endfor
-        >    $(method->return.qtReturn)
+        >    $(method->return.cpp_return)
         >}
     endfor
     >/*
@@ -402,7 +402,7 @@ endfunction
 .endfor
 .#
 .for dependencies.class
-.   output "bindings/cpp/src/$(class.cpp_name).h"
+.   output "bindings/cpp/src/$(class.cpp_name).hpp"
 .   print_class_header (class)
 .   close
 .endfor
@@ -595,16 +595,18 @@ $(project.GENERATED_WARNING_HEADER:)
 .close
 .endmacro
 
-    if count (class, defined (class.api) & class.private = "0")
-        project.cpp_name = project.name
-        for class where defined (class.api) & class.private = "0"
-            class.cpp_name = class.c_name
-        endfor
-        for dependencies.class
-            class.cpp_name = class.c_name
-        endfor
-        generate_binding ()
-    else
-        echo "WTF!? Nothing to do."
-    endif
+if count (class, defined (class.api) & class.private = "0")
+    project.cpp_name = project.name
+    for class where defined (class.api) & class.private = "0"
+        class.cpp_name = class.c_name
+#        echo "class c_name $(class.c_name); class cpp_name $(class.cpp_name)"
+    endfor
+    for dependencies.class
+        class.cpp_name = class.c_name
+    endfor
+    generate_binding ()
+else
+    echo "WTF!? Nothing to do."
+endif
+    
 endfunction
