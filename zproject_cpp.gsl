@@ -226,16 +226,24 @@ function method_signature (method, in_header)
     # compatibility.
     # Exception is if the type is format!
     if count (my.method.argument, argument.variadic) & \
-       !count (my.method.argument, argument.type = "format") & !my.method.has_va_list_sibling
-        echo "BOOM 2 on $(class.name).$(my.method.name)"
-        my.problematic = 1
+        !count (my.method.argument, argument.type = "format") & !my.method.has_va_list_sibling
+        if (my.in_header)
+            my.out = "// TODO: forward variadic arguments\n" + \
+                "//    " + my.out
+        else
+            my.problematic = 1
+        endif
     endif
 
     # Exclude methods where strings are passed by reference as the might get
     # deleted which does not play well with QString.
     if count (my.method.argument, argument.type = "string" & argument.by_reference)
-        echo "BOOM 3 on $(class.name).$(my.method.name)"
-        my.problematic = 1
+        if (my.in_header)
+            my.out = "// TODO: needs OUT argument\n" + \
+                "// " + my.out
+        else
+            my.problematic = 1
+        endif
     endif
 
     if my.problematic
