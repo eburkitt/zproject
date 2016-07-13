@@ -22,5 +22,9 @@ CTestTestfile.cmake
 cmake_install.cmake
 install_manifest.txt
 
-#CLion
-.idea/
+# vagrant
+.vagrant
+
+# CLion / PyCharm
+.idea
+
