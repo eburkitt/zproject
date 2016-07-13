@@ -78,8 +78,8 @@ function resolve_container (container)
         my.container.cpp_type = ""
         my.container.cpp_name = "..."
         my.container.cpp_arg_name = "args"
-        my.container.qtArgPassPre = "va_list args;\n    va_start (args, " + my.container.va_start + ");"
-        my.container.qtArgPassPost = "va_end (args);"
+        my.container.cpp_arg_pass_pre = "va_list args;\n    va_start (args, " + my.container.va_start + ");"
+        my.container.cpp_arg_pass_post = "va_end (args);"
     endif
 endfunction
 
@@ -194,7 +194,7 @@ function method_signature (method, in_header)
             my.out += "~$(class.cpp_name)"
         endif
     else
-        my.out += "$(class.cpp_name:)::"
+        my.out += "$(namespace)::$(class.cpp_name:)::"
         if my.method.is_constructor
             if my.method.name = "new"
                 my.out += "$(class.cpp_name)"
@@ -207,7 +207,7 @@ function method_signature (method, in_header)
     endif
 
     if !my.method.is_constructor & !my.method.is_destructor
-        my.out += "$(my.method.cpp_name:c)"
+        my.out += "$(my.method.cpp_name)"
     endif
     my.out += " ("
 
@@ -303,11 +303,9 @@ function print_class_body (class)
     >
     >#include "$(project.cpp_name).hpp"
     >
-    >using namespace $(namespace);
-    >
     >///
     >//  Copy-construct to return the proper wrapped c types
-    >$(class.cpp_name)::$(class.cpp_name) ($(class.name:c)_t *self)
+    >$(namespace)::$(class.cpp_name)::$(class.cpp_name) ($(class.name:c)_t *self)
     >{
     >    this->self = self;
     >}
@@ -332,7 +330,7 @@ function print_class_body (class)
         if index () = 1
             >);
         else
-            >), qObjParent);
+            >));
         endif
         >}
     endfor
@@ -363,8 +361,8 @@ function print_class_body (class)
         >//  $(method.description:no,block)
         >$(method_signature (method, 0))
         >{
-        for method.argument where defined (argument.qtArgPassPre)
-            >    $(argument.qtArgPassPre)
+        for method.argument where defined (argument.cpp_arg_pass_pre)
+            >    $(argument.cpp_arg_pass_pre)
         endfor
         if (method.has_va_list_sibling)
             >    $(method->return.cpp_call_pre)$(class.c_name:)_v$(method.c_name) (\
@@ -390,8 +388,8 @@ function print_class_body (class)
             endif
         endfor
         >)$(method->return.cpp_call_post);
-        for method.argument where defined (argument.qtArgPassPost)
-            >    $(argument.qtArgPassPost)
+        for method.argument where defined (argument.cpp_arg_pass_post)
+            >    $(argument.cpp_arg_pass_post)
         endfor
         >    $(method->return.cpp_return)
         >}
@@ -463,10 +461,10 @@ class $(class.cpp_name:);
 
 //  Public API classes
 .for class where defined (class.api) & class.private = "0"
-#include "$(class.cpp_name).h"
+#include "$(class.cpp_name).hpp"
 .endfor
 .for dependencies.class
-#include "$(class.cpp_name).h"
+#include "$(class.cpp_name).hpp"
 .endfor
 
 #endif //  CPP_$(PROJECT.PREFIX)_HPP
@@ -527,49 +525,13 @@ $(project.GENERATED_WARNING_HEADER:)
 ## Overview
 
 $(project.cpp_name) is a standard C++ wrapper for $(project.name). It's possible to
-statically or dynamically link against it as well as use it as internal or external
-library.
+statically or dynamically link against it.
 
-## Internal library
-
-You can use the Qt wrapper as internal library by including the
-`$(project.cpp_name).pri` file. Here is a minimal example app:
-
-```make
-QT += core
-QT -= gui
-
-include(<path to pri file>/$(project.cpp_name).pri)
-
-CONFIG   += console
-CONFIG   -= app_bundle
-
-TEMPLATE = app
-
-SOURCES += main.cpp
-```
-
-To link statically against the wrapper you need to change the
-`$(PROJECT.CPP_NAME)_LIBRARY` variable in `config.pri` to `no`.
-
-To link dynamically against the wrapper you need to change the
-`$(PROJECT.CPP_NAME)_LIBRARY` variable in `config.pri` to `yes`.
-
-## External library
-
-To install $(project.cpp_name) as a shared library do the following:
+The default installation directory prefix on unix is `/usr/local/`. If you want
+to change the prefix define do something TBD:
 
 ```sh
-qmake
-make
-sudo make install
-```
-
-The default installation directory prefix on unix is `/usr/local/`. If you like
-to change the prefix define the PREFIX variable when calling qmake:
-
-```sh
-qmake PREFIX=/usr
+TODO: What!?
 ```
 
 ## Notes
@@ -577,25 +539,29 @@ qmake PREFIX=/usr
 ### Dependent classes
 
 If the bindings are generated as part of a zproject that depends on another
-zproject (e.g. zyre on czmq), the Qt bindings will automatically detect all
-dependent classes and generate bindings for them too. Check the ./generate.sh
-output the see which dependent classes couldn't be resolved.
+zproject (e.g. zyre on czmq), the Standard C++ bindings will automatically
+detect all dependent classes and generate bindings for them too. Check the
+generate.sh output the see which dependent classes couldn't be resolved.
 
 ### Format methods
 
-Whenever a c method takes a format followed by variadic arguments, this is
-replaced in the Qt bindings by one string instead.
+Whenever a C method takes a format followed by variadic arguments, this is
+replaced in the Standard C++ bindings by one string.
 
 ### Excluded methods
 
-If you're missing some methods in the bindings then because they have been
+If you're missing some methods in the bindings this is because they have been
 excluded. Currently methods are excluded if,
 
     * they have variadic arguments and don't have a sibling method that
-      accepts a va_list. Most prominent example is probably printf and vprintf.
+      accepts a va_list (like, for example, printf and vprintf).
 
-    * they have char** arguments, as they might get freed which doesn't play
-      well with QString.
+    * they have char** arguments. The wrapped functions for such functions
+      might attempt to free the char*, which this binding currently cannot
+      accommodate.
+
+The missing methods are included in the generated header files as commented-
+out TODOs.
 
 ```
 $(project.GENERATED_WARNING_HEADER:)
@@ -613,8 +579,6 @@ if count (class, defined (class.api) & class.private = "0")
         class.cpp_name = class.c_name
     endfor
     generate_binding ()
-else
-    echo "WTF!? Nothing to do."
 endif
     
 endfunction
