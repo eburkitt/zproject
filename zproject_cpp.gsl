@@ -152,7 +152,6 @@ function method_signature (method, in_header)
             method.cpp_name = method.name
         endif
         method.cpp_name = "$(method.cpp_name:c)"
-#        echo "class $(class.name); method name $(method.name); method cpp_name $(method.cpp_name)"
     endfor
     for class.constructor as method
         if method.name = "streq" \
@@ -165,7 +164,6 @@ function method_signature (method, in_header)
             method.cpp_name = method.name
         endif
         method.cpp_name = "$(method.cpp_name:c)"
-#        echo "class $(class.name); ctor name $(method.name); ctor cpp_name $(method.cpp_name)"
     endfor
     
     my.problematic = 0
@@ -173,7 +171,6 @@ function method_signature (method, in_header)
     if !my.method.is_destructor & !(my.method.is_constructor & my.method.name = "new")
         if my.in_header & my.method.singleton & !method_has_self_pointer (my.method)
             my.out += "static "
-#            echo "is ctor? $(my.method.is_constructor); name $(my.method.name); class cpp_name $(class.cpp_name)"
         endif
         if !my.method.is_constructor
             my.out += method_return_type (my.method)
@@ -221,7 +218,7 @@ function method_signature (method, in_header)
 
     my.out += ")"
 
-    # Variadic methods without a va_list sibling are not allowed, as the
+    # Variadic methods without a va_list sib/.ling are not allowed, as the
     # arguments cannot be forwarded < C++11. This is to ensure backwards
     # compatibility.
     # Exception is if the type is format!
@@ -269,21 +266,47 @@ function print_class_header (class)
     >
     >    //  Copy-construct to return the proper wrapped c types
     >    $(class.cpp_name) ($(class.name:c)_t *self);
-    for class.constructor as method where defined (method_signature (method, 1))
-        >
-        >    //  $(method.description:no,block)
-        >    $(method_signature (method, 1));
+    for class.constructor as method where state ?<> "draft"
+        signature = method_signature (method, 1) ?
+        if defined (signature)
+            >
+            >//  $(method.description:no,block)
+            >$(signature:);
+        endif
     endfor
-    for class.destructor as method where defined (method_signature (method, 1))
-        >
-        >    //  $(method.description:no,block)
-        >    $(method_signature (method, 1));
+    for class.destructor as method where state ?<> "draft"
+        signature = method_signature (method, 1) ?
+        if defined (signature)
+            >
+            >//  $(method.description:no,block)
+            >$(signature:);
+        endif
     endfor
-    for class.method where defined (method_signature (method, 1))
-        >
-        >    //  $(method.description:no,block)
-        >    $(method_signature (method, 1));
+    for class.method where state ?<> "draft"
+        signature = method_signature (method, 1) ?
+        if defined (signature)
+            >
+            >//  $(method.description:no,block)
+            >$(signature:);
+        endif
     endfor
+    if count(class., count.state ?= "draft")
+        >
+        >#ifdef CZMQ_BUILD_DRAFT_API
+        for class. as method where state ?= "draft"
+            if class(method) = "XML item" \
+                & (name(method) = 'constructor' | name(method) = 'destructor' | name(method) = 'method')
+                signature = method_signature (method, 1) ?
+                if defined (signature)
+                    >
+                    >//  *** Draft method, for development use, may change without warning ***
+                    >//  $(method.description:no,block)
+                    >$(signature:);
+                endif
+            endif
+        endfor
+        >#endif // CZMQ_BUILD_DRAFT_API
+    endif
     >
     >    $(class.c_name:)_t *self;
     >};
@@ -296,6 +319,92 @@ function print_class_header (class)
     >*/
 endfunction
 
+function generate_ctor_body(signature)
+    >///
+    >//  $(method.description:no,block)
+    >$(my.signature:)
+    >{
+    if index () = 1
+        >    this->self = $(class.c_name:)_$(method.c_name:) (\
+    else
+        >    return new $(class.cpp_name:) ($(class.c_name:)_$(method.c_name:) (\
+    endif
+    for method.argument where !argument.variadic
+        >$(argument.cpp_arg_name:)\
+        if !last ()
+            >, \
+        endif
+    endfor
+    if index () = 1
+        >);
+    else
+        >));
+    endif
+    >}
+endfunction
+
+function generate_dtor_body(signature)
+    >///
+    >//  $(method.description:no,block)
+    >$(my.signature:)
+    >{
+    >    $(method->return.cpp_call_pre:)$(class.c_name:)_$(method.c_name:) (&self\
+    if count (method.argument) > 1
+        >, \
+    endif
+    for method.argument where !argument.variadic
+        if !first ()
+            >$(argument.cpp_arg_name:)\
+        endif
+        if !last ()
+            >, \
+        endif
+    endfor
+    >)$(method->return.cpp_call_post:);
+    >}
+endfunction
+
+function generate_method_body(signature)
+    >///
+    >//  $(method.description:no,block)
+    >$(my.signature:)
+    >{
+    for method.argument where defined (argument.cpp_arg_pass_pre)
+        >    $(argument.cpp_arg_pass_pre:)
+    endfor
+    if (method.has_va_list_sibling)
+        >    $(method->return.cpp_call_pre:)$(class.c_name:)_v$(method.c_name:) (\
+    else
+        >    $(method->return.cpp_call_pre:)$(class.c_name:)_$(method.c_name:) (\
+    endif
+    if method_has_self_pointer (method)
+        >&self\
+        if count (method.argument) > 1
+            >, \
+        endif
+    elsif !method.singleton
+        >self\
+        if count (method.argument)
+            >, \
+        endif
+    endif
+    for method.argument where !(!method.has_va_list_sibling & argument.variadic) \
+                            & !argument_is_self_pointer (argument)
+        >$(argument.cpp_arg_name:)\
+        if !last ()
+            >, \
+        endif
+    endfor
+    >)$(method->return.cpp_call_post:);
+    for method.argument where defined (argument.cpp_arg_pass_post)
+        >    $(argument.cpp_arg_pass_post:)
+    endfor
+    if method->return.cpp_return <> ''
+        >    $(method->return.cpp_return:)
+    endif
+    >}
+endfunction
+
 function print_class_body (class)
     >/*
     >$(project.GENERATED_WARNING_HEADER:)
@@ -305,95 +414,56 @@ function print_class_body (class)
     >
     >///
     >//  Copy-construct to return the proper wrapped c types
-    >$(namespace)::$(class.cpp_name)::$(class.cpp_name) ($(class.name:c)_t *self)
+    >$(namespace:)::$(class.cpp_name:)::$(class.cpp_name:) ($(class.name:c)_t *self)
     >{
     >    this->self = self;
     >}
     >
-    for class.constructor as method where defined (method_signature (method, 0))
-        >
-        >///
-        >//  $(method.description:no,block)
-        >$(method_signature (method, 0))
-        >{
-        if index () = 1
-            >    this->self = $(class.c_name:)_$(method.c_name) (\
-        else
-            >    return new $(class.cpp_name) ($(class.c_name:)_$(method.c_name) (\
+    for class.constructor as method where state ?<> "draft"
+        signature = method_signature (method, 0) ?
+        if defined (signature)
+            >
+            generate_ctor_body(signature)
         endif
-        for method.argument where !argument.variadic
-            >$(argument.cpp_arg_name)\
-            if !last ()
-                >, \
-            endif
-        endfor
-        if index () = 1
-            >);
-        else
-            >));
-        endif
-        >}
     endfor
-    for class.destructor as method where defined (method_signature (method, 0))
-        >
-        >///
-        >//  $(method.description:no,block)
-        >$(method_signature (method, 0))
-        >{
-        >    $(method->return.cpp_call_pre)$(class.c_name:)_$(method.c_name) (&self\
-        if count (method.argument) > 1
-            >, \
+    for class.destructor as method where state ?<> "draft"
+#        signature = "$(method_signature (method, 0) ? 'ERROR')"
+#        if signature <> 'ERROR'
+        signature = method_signature (method, 0) ?
+        if defined (signature)
+            >
+            generate_dtor_body(signature)
         endif
-        for method.argument where !argument.variadic
-            if !first ()
-                >$(argument.cpp_arg_name)\
-            endif
-            if !last ()
-                >, \
-            endif
-        endfor
-        >)$(method->return.cpp_call_post);
-        >}
     endfor
-    for class.method where defined (method_signature (method, 0))
-        >
-        >///
-        >//  $(method.description:no,block)
-        >$(method_signature (method, 0))
-        >{
-        for method.argument where defined (argument.cpp_arg_pass_pre)
-            >    $(argument.cpp_arg_pass_pre)
-        endfor
-        if (method.has_va_list_sibling)
-            >    $(method->return.cpp_call_pre)$(class.c_name:)_v$(method.c_name) (\
-        else
-            >    $(method->return.cpp_call_pre)$(class.c_name:)_$(method.c_name) (\
+    for class.method where state ?<> "draft"
+        signature = method_signature (method, 0) ?
+        if defined (signature)
+            >
+            generate_method_body(signature)
         endif
-        if method_has_self_pointer (method)
-            >&self\
-            if count (method.argument) > 1
-                >, \
-            endif
-        elsif !method.singleton
-            >self\
-            if count (method.argument)
-                >, \
-            endif
-        endif
-        for method.argument where !(!method.has_va_list_sibling & argument.variadic) \
-                                & !argument_is_self_pointer (argument)
-            >$(argument.cpp_arg_name)\
-            if !last ()
-                >, \
-            endif
-        endfor
-        >)$(method->return.cpp_call_post);
-        for method.argument where defined (argument.cpp_arg_pass_post)
-            >    $(argument.cpp_arg_pass_post)
-        endfor
-        >    $(method->return.cpp_return)
-        >}
     endfor
+    if count(class., count.state ?= "draft")
+        >
+        >#ifdef CZMQ_BUILD_DRAFT_API
+        for class. as method where state ?= "draft"
+            if class(method) = "XML item" \
+                & (name(method) = 'constructor' | name(method) = 'destructor' | name(method) = 'method')
+                signature = method_signature (method, 0) ?
+                if defined (signature)
+                    >
+                    >//  *** Draft method, for development use, may change without warning ***
+                    if name(method) = 'constructor'
+                        generate_ctor_body(signature)
+                    elsif name(method) = 'method'
+                        generate_dtor_body(signature)
+                    else    #name(method) = 'destructor'
+                        generate_method_body(signature)
+                    endif
+                endif
+            endif
+        endfor
+        >#endif // CZMQ_BUILD_DRAFT_API
+    endif
     >/*
     >$(project.GENERATED_WARNING_HEADER:)
     >*/
@@ -573,7 +643,6 @@ if count (class, defined (class.api) & class.private = "0")
     project.cpp_name = project.name
     for class where defined (class.api) & class.private = "0"
         class.cpp_name = class.c_name
-#        echo "class c_name $(class.c_name); class cpp_name $(class.cpp_name)"
     endfor
     for dependencies.class
         class.cpp_name = class.c_name
