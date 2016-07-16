@@ -112,16 +112,15 @@ endfunction
 
 #
 #  A function for constructing a string of arguments for a method declaration
-#  in source/header files. Returns the argument string or 'ERROR'.
+#  in source/header files. Returns the argument string.
 #
 function method_arguments (method)
-    my.problematic = 0
     my.out = ""
-    # Skip arguments that are,
-    #   * self pointer to wrapped struct
-    #   * variadic argument, if start argument is of type format
-    for my.method.argument where !argument_is_self_pointer (argument) & \
-                                 !(argument.variadic & count (my.method.argument, argument.type = "format"))
+    
+#REMOVEME - special handling of 'format' type to duplicate
+#original behavior until more va_list siblings are added
+    for my.method.argument where !argument_is_self_pointer (argument) \
+    & (argument.name <> '_' | count (my.method.argument, a.type = "format", a))
         resolve_container (argument)
         if !(my.method.is_destructor & first ())
             my.out += argument.qtArgType
@@ -134,9 +133,6 @@ function method_arguments (method)
             my.out += ", "
         endif
     endfor
-    if my.problematic
-        my.out = "ERROR"
-    endif
     return my.out
 endfunction
 
@@ -219,11 +215,7 @@ function method_signature (method, in_header)
     my.out += " ("
 
     my.args = method_arguments (my.method)
-    if my.args = "ERROR"
-        my.problematic = 1
-    else
-        my.out += my.args
-    endif
+    my.out += my.args
 
     if my.method.is_constructor
         if !(my.args = "")
@@ -245,15 +237,16 @@ function method_signature (method, in_header)
     endif
 
     # Variadic methods without a va_list sibling are not allowed, as the
-    # arguments cannot be forwared < C++11. This is to ensure backwards
+    # arguments cannot be forwarded < C++11. This is to ensure backwards
     # compatability.
-    # Exception is if the type is format!
-    if count (my.method.argument, argument.variadic) & \
-       !count (my.method.argument, argument.type = "format") & !my.method.has_va_list_sibling
+#REMOVEME - special handling of 'format' type to duplicate
+#original behavior until more va_list siblings are added
+    if count (my.method.argument, argument.variadic \
+    &  !(my.method.has_va_list_sibling | count (my.method.argument, argument.type = "format")))
         my.problematic = 1
     endif
 
-    # Exclude methods where strings are passed by reference as the might get
+    # Exclude methods where strings are passed by reference as they might get
     # deleted which does not play well with QString.
     if count (my.method.argument, argument.type = "string" & argument.by_reference)
         my.problematic = 1
@@ -306,6 +299,7 @@ function print_class_header (class)
 endfunction
 
 function print_class_body (class)
+echo "class $(class.name)"
     >/*
     >$(project.GENERATED_WARNING_HEADER:)
     >*/
@@ -365,6 +359,7 @@ function print_class_body (class)
         >}
     endfor
     for class.method where defined (method_signature (method, 0))
+echo "    method $(method.name); has valist sibling $(method.has_va_list_sibling)"
         >
         >///
         >//  $(method.description:no,block)
@@ -389,8 +384,10 @@ function print_class_body (class)
                 >, \
             endif
         endif
-        for method.argument where !(!method.has_va_list_sibling & argument.variadic) \
-                                & !argument_is_self_pointer (argument)
+        for method.argument where !argument_is_self_pointer (argument) \
+        &   (!argument.variadic | (method.has_va_list_sibling | argument.type = "format"))
+echo "        argument $(argument.name); variadic? $(argument.variadic); has va_list sibling $(method.has_va_list_sibling); arg type $(argument.type)"
+echo "            qtArgPass defined? $(defined(argument.qtArgPass))"
             >$(argument.qtArgPass)\
             if !last ()
                 >, \
