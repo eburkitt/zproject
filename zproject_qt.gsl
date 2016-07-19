@@ -390,7 +390,8 @@ function print_class_body (class)
             endif
         endif
         for method.argument where !(!method.has_va_list_sibling & argument.variadic) \
-                                & !argument_is_self_pointer (argument)
+                                & !argument_is_self_pointer (argument) \
+                                & defined (argument.qtArgPass)
             >$(argument.qtArgPass)\
             if !last ()
                 >, \
